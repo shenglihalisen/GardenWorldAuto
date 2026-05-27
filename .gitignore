@@ -1,0 +1,36 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# Android
+*.apk
+*.aab
+*.dex
+*.class
+*.jar
+*.log
+
+# Local
+local.properties
+*.keystore
+*.jks
+secrets/
+
+# Models (don't commit large model files)
+*.task
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
