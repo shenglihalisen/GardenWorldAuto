@@ -17,13 +17,21 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Configure git line endings
+    - name: Debug - Show working directory
       run: |
-        git config --global core.autocrlf input
-        git checkout HEAD -- gradlew
+        pwd
+        ls -la
 
-    - name: List files
-      run: ls -la
+    - name: Debug - Check gradlew
+      run: |
+        if [ -f gradlew ]; then
+          echo "gradlew exists"
+          ls -la gradlew
+          head -5 gradlew
+        else
+          echo "gradlew NOT found"
+          find . -name "gradlew" -type f
+        fi
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
@@ -32,13 +40,10 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    - name: Make gradlew executable
+    - name: Build Debug APK
       run: |
         chmod +x gradlew
-        ls -la gradlew
-
-    - name: Build Debug APK
-      run: ./gradlew assembleDebug
+        ./gradlew assembleDebug
 
     - name: Build Release APK
       run: ./gradlew assembleRelease
