@@ -17,6 +17,11 @@ jobs:
       with:
         fetch-depth: 1
 
+    - name: Configure git line endings
+      run: |
+        git config --global core.autocrlf input
+        git checkout HEAD -- gradlew
+
     - name: List files
       run: ls -la
 
