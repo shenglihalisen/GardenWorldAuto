@@ -17,10 +17,11 @@ import java.io.File
 class GemmaInferenceEngine(private val context: Context) {
     
     companion object {
-        const val MODEL_FILE = "gemma-3-270m-it-q8.task"
-        const val MAX_TOKENS = 512
+        // 使用 Gemma 4 E4B 模型（效果最好，约5GB）
+        const val MODEL_FILE = "gemma-4-e4b-it.task"
+        const val MAX_TOKENS = 1024  // E4B支持更大的token数
         const val TEMPERATURE = 0.7f
-        const val MIN_MODEL_SIZE = 80_000_000L
+        const val MIN_MODEL_SIZE = 4_000_000_000L  // 约4GB最小大小
     }
     
     private var inferenceSession: InferenceSession? = null

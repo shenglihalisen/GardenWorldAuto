@@ -63,7 +63,8 @@ class ModelDownloadService : Service() {
     private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val downloadState: StateFlow<DownloadState> = _downloadState
 
-    private val _selectedModel = MutableStateFlow(ModelOption.GEMMA_270M)
+    // 默认使用 Gemma 4 E4B 模型（效果最好，约5GB）
+    private val _selectedModel = MutableStateFlow(ModelOption.GEMMA_E4B)
     val selectedModel: StateFlow<ModelOption> = _selectedModel
 
     inner class LocalBinder : Binder() { 
