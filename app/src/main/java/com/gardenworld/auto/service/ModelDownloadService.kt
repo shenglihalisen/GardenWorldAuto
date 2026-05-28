@@ -1,10 +1,7 @@
 package com.gardenworld.auto.service
 
 import android.app.Service
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Binder
 import android.os.IBinder
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +12,13 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
+/**
+ * 模型下载服务
+ * 
+ * 安全加固：
+ * 1. 限制重定向次数，防止重定向循环攻击
+ * 2. 验证重定向目标域名白名单，防止SSRF/恶意文件注入
+ */
 class ModelDownloadService : Service() {
 
     enum class ModelOption(
@@ -32,6 +36,25 @@ class ModelDownloadService : Service() {
             "~5GB", 4_000_000_000L)
     }
 
+    companion object {
+        // 安全修复：允许的重定向目标域名白名单
+        private val ALLOWED_HOSTS = setOf(
+            "huggingface.co",
+            "www.huggingface.co",
+            "cdn-lfs.huggingface.co",
+            "hf.co",
+            "cdn.hf.co",
+            "storage.googleapis.com"  // Google Cloud Storage
+        )
+        
+        // 安全修复：最大重定向次数
+        private const val MAX_REDIRECTS = 5
+        
+        // 安全修复：连接超时（毫秒）
+        private const val CONNECT_TIMEOUT = 30000
+        private const val READ_TIMEOUT = 60000
+    }
+
     private val binder = LocalBinder()
     private var downloadThread: Thread? = null
     private var isDownloading = false
@@ -43,7 +66,9 @@ class ModelDownloadService : Service() {
     private val _selectedModel = MutableStateFlow(ModelOption.GEMMA_270M)
     val selectedModel: StateFlow<ModelOption> = _selectedModel
 
-    inner class LocalBinder : Binder() { fun getService(): ModelDownloadService = this@ModelDownloadService }
+    inner class LocalBinder : Binder() { 
+        fun getService(): ModelDownloadService = this@ModelDownloadService 
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -87,53 +112,105 @@ class ModelDownloadService : Service() {
         Timber.d("Start downloading: ${model.name}")
     }
 
+    /**
+     * 安全修复：验证URL是否在白名单中
+     */
+    private fun isUrlAllowed(urlString: String): Boolean {
+        return try {
+            val url = URL(urlString)
+            val host = url.host.lowercase()
+            ALLOWED_HOSTS.any { allowed -> host == allowed || host.endsWith(".$allowed") }
+        } catch (e: Exception) {
+            Timber.e("URL解析失败: $urlString")
+            false
+        }
+    }
+
     private fun downloadModel(model: ModelOption) {
         var connection: HttpURLConnection? = null
         val targetFile = File(filesDir, model.fileName)
         val tempFile = File(filesDir, "${model.fileName}.tmp")
 
         try {
+            // 安全修复：验证初始URL
+            if (!isUrlAllowed(model.downloadUrl)) {
+                throw SecurityException("初始URL不在白名单中: ${model.downloadUrl}")
+            }
+            
             var downloadedBytes = if (tempFile.exists()) tempFile.length() else 0L
-            val url = URL(model.downloadUrl)
-            connection = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 30000; readTimeout = 60000
-                setRequestProperty("User-Agent", "GardenWorldAuto/1.0")
-                if (downloadedBytes > 0) setRequestProperty("Range", "bytes=$downloadedBytes-")
-                instanceFollowRedirects = false
-            }
-
-            var responseCode = connection.responseCode
-            while (responseCode in 300..399 && responseCode < 400) {
-                val newUrl = connection.getHeaderField("Location")
-                connection.disconnect()
-                connection = (URL(newUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 30000; readTimeout = 60000
+            var currentUrl = model.downloadUrl
+            var redirectCount = 0
+            
+            // 安全修复：限制重定向次数
+            while (redirectCount < MAX_REDIRECTS) {
+                val url = URL(currentUrl)
+                connection = (url.openConnection() as HttpURLConnection).apply {
+                    connectTimeout = CONNECT_TIMEOUT
+                    readTimeout = READ_TIMEOUT
                     setRequestProperty("User-Agent", "GardenWorldAuto/1.0")
-                    if (downloadedBytes > 0) setRequestProperty("Range", "bytes=$downloadedBytes-")
+                    instanceFollowRedirects = false  // 手动处理重定向
+                    if (downloadedBytes > 0) {
+                        setRequestProperty("Range", "bytes=$downloadedBytes-")
+                    }
                 }
-                responseCode = connection.responseCode
+
+                val responseCode = connection.responseCode
+                
+                // 处理重定向
+                if (responseCode in 300..399) {
+                    val newUrl = connection.getHeaderField("Location") 
+                        ?: throw Exception("重定向缺少Location头")
+                    
+                    // 安全修复：验证重定向目标
+                    if (!isUrlAllowed(newUrl)) {
+                        connection.disconnect()
+                        throw SecurityException("重定向到不受信任的域名: $newUrl")
+                    }
+                    
+                    currentUrl = newUrl
+                    redirectCount++
+                    connection.disconnect()
+                    Timber.d("重定向 $redirectCount: $currentUrl")
+                    continue
+                }
+                
+                // 非重定向状态码，跳出循环
+                break
+            }
+            
+            // 安全修复：检查是否超过最大重定向次数
+            if (redirectCount >= MAX_REDIRECTS) {
+                throw SecurityException("重定向次数超过最大值: $MAX_REDIRECTS")
             }
 
-            val totalSize: Long
-            if (responseCode == 206) {
-                val contentRange = connection.getHeaderField("Content-Range")
-                totalSize = contentRange?.substringAfter("/")?.toLongOrNull() ?: connection.contentLengthLong + downloadedBytes
-            } else if (responseCode == 200) {
-                downloadedBytes = 0; totalSize = connection.contentLengthLong
-            } else {
-                throw Exception("HTTP错误: $responseCode")
+            // 获取最终响应
+            val finalResponseCode = connection?.responseCode ?: -1
+            val totalSize: Long = when (finalResponseCode) {
+                200 -> {
+                    downloadedBytes = 0
+                    connection.contentLengthLong
+                }
+                206 -> {
+                    val contentRange = connection.getHeaderField("Content-Range")
+                    contentRange?.substringAfter("/")?.toLongOrNull() 
+                        ?: (connection.contentLengthLong + downloadedBytes)
+                }
+                else -> throw Exception("HTTP错误: $finalResponseCode")
             }
 
             Timber.d("下载: 已有${downloadedBytes/1024/1024}MB, 总计${totalSize/1024/1024}MB")
 
             val inputStream = connection.inputStream
             val outputStream = FileOutputStream(tempFile, downloadedBytes > 0)
-            val buffer = ByteArray(8192); var bytesRead: Int
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
 
             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                 if (shouldCancel) {
-                    outputStream.close(); inputStream.close()
-                    _downloadState.value = DownloadState.Idle; return
+                    outputStream.close()
+                    inputStream.close()
+                    _downloadState.value = DownloadState.Idle
+                    return
                 }
                 outputStream.write(buffer, 0, bytesRead)
                 downloadedBytes += bytesRead
@@ -143,15 +220,29 @@ class ModelDownloadService : Service() {
                 }
             }
 
-            outputStream.close(); inputStream.close()
+            outputStream.close()
+            inputStream.close()
+            connection.disconnect()
+            
+            // 验证下载完整性
+            if (tempFile.length() < model.minSizeBytes) {
+                throw Exception("下载文件不完整: ${tempFile.length()} < ${model.minSizeBytes}")
+            }
+            
+            // 移动到最终位置
             if (tempFile.renameTo(targetFile)) {
                 _downloadState.value = DownloadState.Completed(model)
+                Timber.d("模型下载完成: ${targetFile.length()/1024/1024}MB")
             } else {
-                tempFile.copyTo(targetFile, overwrite = true); tempFile.delete()
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
                 _downloadState.value = DownloadState.Completed(model)
             }
-            Timber.d("模型下载完成: ${targetFile.length()/1024/1024}MB")
 
+        } catch (e: SecurityException) {
+            // 安全异常单独处理
+            Timber.e(e, "安全验证失败")
+            _downloadState.value = DownloadState.Error(model, "安全验证失败: ${e.message}")
         } catch (e: Exception) {
             Timber.e(e, "模型下载失败")
             _downloadState.value = DownloadState.Error(model, "下载失败: ${e.message}")
@@ -173,7 +264,8 @@ class ModelDownloadService : Service() {
         return file.exists() && file.length() >= model.minSizeBytes
     }
 
-    fun getModelPath(model: ModelOption = selectedModel.value): String = File(filesDir, model.fileName).absolutePath
+    fun getModelPath(model: ModelOption = selectedModel.value): String = 
+        File(filesDir, model.fileName).absolutePath
 
     override fun onDestroy() {
         super.onDestroy()
